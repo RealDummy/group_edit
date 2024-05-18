@@ -1,4 +1,4 @@
-use std::{borrow::Cow, default, io::{self, Bytes, Read}, thread, time::Duration};
+use std::{borrow::Cow, default, io::{self, Bytes, Read}, num::NonZeroU16, thread, time::Duration};
 use tui::{
     backend::CrosstermBackend, layout::{Constraint, Direction, Layout}, text, widgets::{self, Block, Borders, Paragraph, Widget, Wrap}, Terminal
 };
@@ -9,21 +9,61 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 
+pub type User = NonZeroU16;
+pub type WordCounter_t = u32;
+struct WordId {
+    owner: Option<NonZeroU16>,
+    id: u32,
+}
+impl WordId {
+    pub fn new(uid: User, id: WordCounter_t) -> Self {
+        Self {
+            owner: Some(uid),
+            id,
+        }
+    }
+    pub fn start() -> Self {
+        Self {
+            owner: None,
+            id: u32::MIN
+        }
+    }
+    pub fn end() -> Self {
+        Self {
+            owner: None,
+            id: u32::MAX,
+        }
+    }
+}
+
+struct Word {
+    id: WordId,
+    word: String,
+}
+
+
 struct TextStore {
-    text: String,
-    cursor_index: usize,
+    text: Vec<Word>,
+    cursor_word: WordId,
+    cursor_char_loc: usize,
 }
 
 impl TextStore {
     pub fn new() -> Self {
         Self {
-            text: String::new(),
-            cursor_index: 0
+            text: vec![Word {
+                id: WordId::start(),
+                word: String::new(),
+            }, Word {
+                id: WordId::end(),
+                word: String::new(),
+            }],
+            cursor_word: WordId::end(),
+            cursor_char_loc: 0
         }
     }
     pub fn push(&mut self, c: char) {
-        self.text.insert(self.cursor_index, c);
-        self.cursor_index += 1;
+        
     }
     pub fn pop(&mut self) {
         if self.cursor_index == 0 {
@@ -47,27 +87,33 @@ impl TextStore {
         self.cursor_index = self.cursor_index.saturating_sub(1);
 
     }
-    pub fn cursor_up(&mut self, width: u16) {
-        let line_start_min = self.cursor_index.saturating_sub(width as usize);
-        let line_start = self.text[line_start_min..self.cursor_index].chars()
+    fn line_start(&self,pos:usize, width: u16) -> usize {
+        let line_start_min = self.cursor_index.saturating_sub(width as usize - 1);
+        self.text[line_start_min..self.cursor_index].chars()
             .enumerate()
-            .filter(|&(i,c)| c == '\n')
+            .filter(|&(_,c)| c == '\n')
             .last()
-            .unwrap_or((0, '\n')).0 + line_start_min;
-        self.cursor_index = line_start.saturating_sub(1)
+            .unwrap_or((0, '\n')).0 + line_start_min
     }
-    pub fn cursor_down(&mut self, width: u16) {
+    fn next_line_start(&self, pos: usize, width: u16) -> usize {
         let len: usize = self.text.chars().count();
-        let line_end_max = (self.cursor_index + (width as usize)).min(len);
-        let line_end = self.text[self.cursor_index..line_end_max].chars()
+        let line_end_max = (pos + (width as usize)).min(len);
+        let line_end = self.text[pos..line_end_max].chars()
             .enumerate()
             .filter(|&(_,c)| c == '\n')
             .next()
-            .unwrap_or((0, '\n')).0 + line_end_max;
-        self.cursor_index = (line_end_max + 1).min(len)
+            .unwrap_or((0, '\n')).0 + self.cursor_index + 1;
+        line_end.min(len)
+    }
+    pub fn cursor_up(&mut self, width: u16) {
+        self.cursor_index = self.line_start(self.cursor_index, width);
+        self.cursor_index = self.cursor_index;
+    }
+    pub fn cursor_down(&mut self, width: u16) {
+        self.cursor_index = self.next_line_start(self.cursor_index, width);
     }
     pub fn cursor_position(&self, width: u16) -> (u16, u16) {
-        (0..self.cursor_index + 1).into_iter().zip(self.text.chars())
+        (0..self.cursor_index).into_iter().zip(self.text.chars())
             .fold((0,0), |(w,h), (_,c)| {
                 match c {
                     '\n' => (0,h+1),
@@ -135,7 +181,7 @@ fn main() -> Result<(), io::Error> {
             ).block(
                 Block::default()
                     .borders(Borders::all())
-                    .title("text")
+                    .title(format!("{:?}", input_buffer.cursor_position(last_width)))
             ).wrap(Wrap {trim: false});
             f.render_widget(block, size);
             let (x,y) = input_buffer.cursor_position(last_width);
